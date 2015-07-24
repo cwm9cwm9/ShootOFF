@@ -54,7 +54,8 @@ import javafx.scene.image.Image;
 
 
 public class CameraManager {
-	public static final int HISTORY_SIZE = 30;
+	public static final int LASER_TRANSITION = 10;
+	public static final int HISTORY_SIZE = 5;
 	public static final float HISTORY_SIZE_FLOAT = (float)HISTORY_SIZE;
 	public static final int FEED_WIDTH = 640;
 	public static final int FEED_HEIGHT = 480;
@@ -245,20 +246,10 @@ public class CameraManager {
 		private final ExecutorService detectionExecutor = Executors.newFixedThreadPool(200);
 
 		private BufferedImage[] frameHistory = new BufferedImage[HISTORY_SIZE];
-		private int[][][] variance_historyR = new int [640][480][HISTORY_SIZE];
-		private int[][][] variance_historyG = new int [640][480][HISTORY_SIZE];
-		private int[][][] variance_historyB = new int [640][480][HISTORY_SIZE];
-		private int[][] pixelSumOverTimeR = new int [640][480];
-		private int[][] pixelSumOverTimeG = new int [640][480];
-		private int[][] pixelSumOverTimeB = new int [640][480];
-		private int[][] varianceSumOverTimeR = new int [640][480];
-		private int[][] varianceSumOverTimeG = new int [640][480];
-		private int[][] varianceSumOverTimeB = new int [640][480];
-		private float[][] meanOfR = new float [640][480];
-		private float[][] meanOfG = new float [640][480];
-		private float[][] meanOfB = new float [640][480];
-	    float[][] shotTransform = new float [640][480];
-
+	    int[][] amplitudeR = new int [640][480];
+	    int[][] amplitudeG = new int [640][480];
+	    int[][] amplitudeB = new int [640][480];
+	    int[][] shotTransform = new int [640][480];
 		private int historyIndex;
 		private boolean historyReady;
 
@@ -479,13 +470,7 @@ public class CameraManager {
 		}
 
 		private void detectShotsNew(BufferedImage frame, AverageFrameComponents averages) {
-			float oneStandardDeviationR=0;
-			float oneStandardDeviationG=0;
-			float oneStandardDeviationB=0;
-			int R,G,B;
-			float amplitude;
-			int count;
-			count=0;
+			int R,G,B,maxR,maxG,maxB;
 			if (!isDetecting) {
 				//frameProcessing=false;
 				return;
@@ -493,186 +478,74 @@ public class CameraManager {
 
 			for (int x = 0; x < 640; x++) {
 				for (int y = 0; y < 480; y++) {
-					shotTransform[x][y]=(float)0.0;
+					shotTransform[x][y]=0;
 				}
 			}
 
 			for (int x = 2; x < 638; x++) {
 				for (int y = 2; y < 478; y++) {
-					// Grab the pixel colors, we'll need them a few times
-					R = (frame.getRGB(x,y) >> 16) & 0x000000FF;
-					G = (frame.getRGB(x,y) >> 8) & 0x000000FF;
-					B = (frame.getRGB(x,y) >> 0) & 0x000000FF;
+					// Reset the minimum values
+					maxR=0;
+					maxG=0;
+					maxB=0;
+					int rgbPixel;
 
-					// Remove the exiting circular buffer frame from the various total variables
-					pixelSumOverTimeR[x][y]-=(frameHistory[historyIndex].getRGB(x,y) >> 16) & 0x000000FF;
-					pixelSumOverTimeG[x][y]-=(frameHistory[historyIndex].getRGB(x,y) >> 8) & 0x000000FF;
-					pixelSumOverTimeB[x][y]-=(frameHistory[historyIndex].getRGB(x,y) >> 0) & 0x000000FF;
-					varianceSumOverTimeR[x][y]-=variance_historyR[x][y][historyIndex];
-					varianceSumOverTimeG[x][y]-=variance_historyG[x][y][historyIndex];
-					varianceSumOverTimeB[x][y]-=variance_historyB[x][y][historyIndex];
-					// Add the new pixels into the various pixel totals
-					pixelSumOverTimeR[x][y]+=R;
-					pixelSumOverTimeG[x][y]+=G;
-					pixelSumOverTimeB[x][y]+=B;
-					// Calculate the mean over time
-					meanOfR[x][y]=(float)(pixelSumOverTimeR[x][y]/HISTORY_SIZE_FLOAT);
-					meanOfG[x][y]=(float)(pixelSumOverTimeG[x][y]/HISTORY_SIZE_FLOAT);
-					meanOfB[x][y]=(float)(pixelSumOverTimeB[x][y]/HISTORY_SIZE_FLOAT);
+					for (int i = 0; i < HISTORY_SIZE; i++) {
+						rgbPixel=frameHistory[i].getRGB(x,y);
+						maxR=Math.max(maxR, (rgbPixel >> 16) & 0x000000FF);
+						maxG=Math.max(maxG, (rgbPixel >> 8) & 0x000000FF);
+						maxB=Math.max(maxB, (rgbPixel >> 0) & 0x000000FF);
+					}
+
+					rgbPixel=frame.getRGB(x,y);
+					R = (rgbPixel >> 16) & 0x000000FF;
+					G = (rgbPixel >> 8) & 0x000000FF;
+					B = (rgbPixel >> 0) & 0x000000FF;
+
+					amplitudeR[x][y]=Math.max(-10, Math.min(40, (R-maxR)));
+					amplitudeG[x][y]=Math.max(-10, Math.min(40, (G-maxG)));
+					amplitudeB[x][y]=Math.max(-10, Math.min(40, (B-maxB)));
 				}
 			}
+			// Perform hough transform
+			int amplitude;
 			for (int x = 2; x < 638; x++) {
 				for (int y = 2; y < 478; y++) {
-					R = (frame.getRGB(x,y) >> 16) & 0x000000FF;
-					G = (frame.getRGB(x,y) >> 8) & 0x000000FF;
-					B = (frame.getRGB(x,y) >> 0) & 0x000000FF;
-
-					float highestNearbyMeanOfR;
-					float highestNearbyMeanOfG;
-					float highestNearbyMeanOfB;
-					highestNearbyMeanOfR=
-							Math.max(
-									Math.max(
-											Math.max(
-													Math.max(
-															Math.max(
-																	Math.max(
-																			Math.max(
-																					Math.max(meanOfR[x-1][y-1],
-																							meanOfR[x-1][y]),
-																					meanOfR[x-1][y+1]),
-																			meanOfR[x][y-1]),
-																	meanOfR[x][y]),
-															meanOfR[x][y+1]),
-													meanOfR[x+1][y-1]),
-											meanOfR[x+1][y]),
-									meanOfR[x+1][y+1]);
-					highestNearbyMeanOfG=
-							Math.max(
-									Math.max(
-											Math.max(
-													Math.max(
-															Math.max(
-																	Math.max(
-																			Math.max(
-																					Math.max(meanOfG[x-1][y-1],
-																							meanOfG[x-1][y]),
-																					meanOfG[x-1][y+1]),
-																			meanOfG[x][y-1]),
-																	meanOfG[x][y]),
-															meanOfG[x][y+1]),
-													meanOfG[x+1][y-1]),
-											meanOfG[x+1][y]),
-									meanOfG[x+1][y+1]);
-					highestNearbyMeanOfB=
-							Math.max(
-									Math.max(
-											Math.max(
-													Math.max(
-															Math.max(
-																	Math.max(
-																			Math.max(
-																					Math.max(meanOfB[x-1][y-1],
-																							meanOfB[x-1][y]),
-																					meanOfB[x-1][y+1]),
-																			meanOfB[x][y-1]),
-																	meanOfB[x][y]),
-															meanOfB[x][y+1]),
-													meanOfB[x+1][y-1]),
-											meanOfB[x+1][y]),
-									meanOfB[x+1][y+1]);
-
-					// Calcualte the new variances and put them into the history circular buffer
-					variance_historyR[x][y][historyIndex]=(int)((highestNearbyMeanOfR-R)*(highestNearbyMeanOfR-R));
-					variance_historyG[x][y][historyIndex]=(int)((highestNearbyMeanOfG-G)*(highestNearbyMeanOfG-G));
-					variance_historyB[x][y][historyIndex]=(int)((highestNearbyMeanOfB-B)*(highestNearbyMeanOfB-B));
-                    // Add the new variances into the various variance totals
-					varianceSumOverTimeR[x][y]+=variance_historyR[x][y][historyIndex];
-					varianceSumOverTimeG[x][y]+=variance_historyG[x][y][historyIndex];
-					varianceSumOverTimeB[x][y]+=variance_historyB[x][y][historyIndex];
-					// Calculate strandard deviations
-					oneStandardDeviationR = (float)Math.sqrt(varianceSumOverTimeR[x][y]/HISTORY_SIZE_FLOAT)+(float)1;
-					oneStandardDeviationG = (float)Math.sqrt(varianceSumOverTimeG[x][y]/HISTORY_SIZE_FLOAT)+(float)1;
-					oneStandardDeviationB = (float)Math.sqrt(varianceSumOverTimeB[x][y]/HISTORY_SIZE_FLOAT)+(float)1;
-
-//					if( R > highestNearbyMeanOfR ) {
-//						count++;
-						amplitude=Math.min(3, (R-highestNearbyMeanOfR)/oneStandardDeviationR);
-						shotTransform[x][y-2] += amplitude; // Copy the values to the grid
-						shotTransform[x][y+2] += amplitude; // Copy the values to the grid
+					// Seach for bright pixels that are potientially edges (must neighbor a dark pixel)
+					if(amplitudeR[x][y]>LASER_TRANSITION && (amplitudeR[x+1][y]<LASER_TRANSITION||amplitudeR[x-1][y]<LASER_TRANSITION||amplitudeR[x][y+1]<LASER_TRANSITION||amplitudeR[x][y-1]<LASER_TRANSITION)) {
+						// Update acumulator space for Hough transform
+						amplitude = amplitudeR[x][y];
 						for(int dx=-1;dx<=1;dx++) {
-							 shotTransform[x+dx][y-1] += amplitude; // Copy the values to the grid
-							 shotTransform[x+dx][y+1] += amplitude; // Copy the values to the grid
-						}
-						for(int dx=-2;dx<=2;dx++) {
-							 shotTransform[x+dx][y] += amplitude; // Copy the values to the grid
-						}
-//					}
-//					if( G > highestNearbyMeanOfG ) {
-//						count++;
-						amplitude=Math.min(3, (G-highestNearbyMeanOfG)/oneStandardDeviationG);
-						shotTransform[x][y-2] += amplitude; // Copy the values to the grid
-						shotTransform[x][y+2] += amplitude; // Copy the values to the grid
-						for(int dx=-1;dx<=1;dx++) {
-							 shotTransform[x+dx][y-1] += amplitude; // Copy the values to the grid
-							 shotTransform[x+dx][y+1] += amplitude; // Copy the values to the grid
-						}
-						for(int dx=-2;dx<=2;dx++) {
-							 shotTransform[x+dx][y] += amplitude; // Copy the values to the grid
-						}
-//					}
-//					if( B > highestNearbyMeanOfB ) {
-//						count++;
-						amplitude=Math.max(-1, Math.min(3, (B-highestNearbyMeanOfB)/oneStandardDeviationB));
-						shotTransform[x][y-2] += amplitude; // Copy the values to the grid
-						shotTransform[x][y+2] += amplitude; // Copy the values to the grid
-						for(int dx=-1;dx<=1;dx++) {
-							 shotTransform[x+dx][y-1] += amplitude; // Copy the values to the grid
-							 shotTransform[x+dx][y+1] += amplitude; // Copy the values to the grid
-						}
-						for(int dx=-2;dx<=2;dx++) {
-							 shotTransform[x+dx][y] += amplitude; // Copy the values to the grid
-						}
-//					}
-
-/*
-  					if( R > (meanOfR+oneStandardDeviationR*4) ) {
-						 shotTransform[x][y-2] += 1; // Copy the values to the grid
-						 shotTransform[x][y+2] += 1; // Copy the values to the grid
-						for(int dx=-1;dx<=1;dx++) {
-							 shotTransform[x+dx][y-1] += 1; // Copy the values to the grid
-							 shotTransform[x+dx][y+1] += 1; // Copy the values to the grid
-						}
-						for(int dx=-2;dx<=2;dx++) {
-							 shotTransform[x+dx][y] += 1; // Copy the values to the grid
+							for(int dy=-1;dy<=1;dy++) {
+							 shotTransform[x+dx][y+dy] += amplitude;
+							}
 						}
 					}
-  					if( G > (meanOfR+oneStandardDeviationG*4) ) {
-						 shotTransform[x][y-2] += 1; // Copy the values to the grid
-						 shotTransform[x][y+2] += 1; // Copy the values to the grid
-						for(int dx=-1;dx<=1;dx++) {
-							 shotTransform[x+dx][y-1] += 1; // Copy the values to the grid
-							 shotTransform[x+dx][y+1] += 1; // Copy the values to the grid
-						}
-						for(int dx=-2;dx<=2;dx++) {
-							 shotTransform[x+dx][y] += 1; // Copy the values to the grid
-						}
-					}
-  					if( B > (meanOfR+oneStandardDeviationB*4) ) {
-						 shotTransform[x][y-2] += 1; // Copy the values to the grid
-						 shotTransform[x][y+2] += 1; // Copy the values to the grid
-						for(int dx=-1;dx<=1;dx++) {
-							 shotTransform[x+dx][y-1] += 1; // Copy the values to the grid
-							 shotTransform[x+dx][y+1] += 1; // Copy the values to the grid
-						}
-						for(int dx=-2;dx<=2;dx++) {
-							 shotTransform[x+dx][y] += 1; // Copy the values to the grid
-						}
-					}
-*/
 
+					// Seach for bright pixels that are potientially edges (must neighbor a dark pixel)
+					if(amplitudeG[x][y]>5 && (amplitudeG[x+1][y]<LASER_TRANSITION||amplitudeG[x-1][y]<LASER_TRANSITION||amplitudeG[x][y+1]<LASER_TRANSITION||amplitudeG[x][y-1]<LASER_TRANSITION)) {
+						// Update acumulator space for Hough transform
+						amplitude = Math.min(amplitudeG[x][y], 20);
+						for(int dx=-1;dx<=1;dx++) {
+							for(int dy=-1;dy<=1;dy++) {
+							 shotTransform[x+dx][y+dy] += amplitude;
+							}
+						}
+					}
+
+					// Seach for bright pixels that are potientially edges (must neighbor a dark pixel)
+					if(amplitudeB[x][y]>LASER_TRANSITION && (amplitudeB[x+1][y]<LASER_TRANSITION||amplitudeB[x-1][y]<LASER_TRANSITION||amplitudeB[x][y+1]<LASER_TRANSITION||amplitudeB[x][y-1]<LASER_TRANSITION)) {
+						// Update acumulator space for Hough transform
+						amplitude = Math.max(amplitudeB[x][y], 20);
+						for(int dx=-1;dx<=1;dx++) {
+							for(int dy=-1;dy<=1;dy++) {
+							 shotTransform[x+dx][y+dy] += amplitude;
+							}
+						}
+					}
 				}
 			}
+
 			// Copy the current frame into the circular buffer
 			frameHistory[historyIndex].createGraphics().drawImage(frame, 0, 0, null);
 
@@ -684,21 +557,19 @@ public class CameraManager {
 				return;
 			}
 
-
 			// Check for hit
 			float max;
 			max=0;
 			for (int x = 2; x < 638; x++) {
 				for (int y = 2; y < 478; y++) {
 					if (max<shotTransform[x][y]) max = shotTransform[x][y];
-					if (shotTransform[x][y]>6) {
+					if (shotTransform[x][y]>300) {
 						logger.debug("Suspected shot accepted: ({}, {})", x, y);
   				    	canvasManager.addShot(javafx.scene.paint.Color.RED, (double)x, (double)y);
 					}
 				}
 			}
 			System.out.printf("Max shottransform %f \n", max);
-			System.out.printf("pixels over avg %d \n", count);
 
 			//frameProcessing=false;
 
