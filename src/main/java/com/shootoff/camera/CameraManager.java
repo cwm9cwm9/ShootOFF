@@ -55,7 +55,7 @@ import javafx.scene.image.Image;
 
 public class CameraManager {
 	public static final int LASER_TRANSITION = 30;
-	public static final int HISTORY_SIZE = 4;
+	public static final int HISTORY_SIZE = 3;
 	public static final int HUGHES_TRANFORM_THRESHOLD=75;
 	public static final float HISTORY_SIZE_FLOAT = (float)HISTORY_SIZE;
 	public static final int FEED_WIDTH = 640;
@@ -257,6 +257,9 @@ public class CameraManager {
 		private File videoFile;
 		private IMediaReader reader;
 
+		private int framesProcessed;
+		long startTime;
+
 		public Detector()
 		{
 			for (int i=0;i<HISTORY_SIZE;i++) {
@@ -272,6 +275,7 @@ public class CameraManager {
 			reader = ToolFactory.makeReader(videoFile.getAbsolutePath());
 			reader.setBufferedImageTypeToGenerate(BufferedImage.TYPE_3BYTE_BGR);
 			reader.addListener(this);
+			framesProcessed=0;
 		}
 
 		@Override
@@ -549,11 +553,13 @@ public class CameraManager {
 
 			historyIndex=(historyIndex+1) % HISTORY_SIZE;
 			if (historyIndex==0) historyReady=true;
+			if(!historyReady) startTime = System.currentTimeMillis();
 
 			if (historyReady==false) {
 				//frameProcessing=false;
 				return;
 			}
+			framesProcessed++;
 
 			// Check for hit
 			float max;
@@ -568,6 +574,8 @@ public class CameraManager {
 				}
 			}
 			System.out.printf("Max shottransform %f \n", max);
+			System.out.printf("FPS %f \n", (framesProcessed*1000.0/(System.currentTimeMillis()-startTime)));
+
 
 			//frameProcessing=false;
 
