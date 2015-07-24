@@ -93,27 +93,6 @@ public class CameraManager {
 	private long recordingStartTime;
 	private boolean[][] sectorStatuses;
 
-
-
-	private static byte[][][] FrameHistoryRed;
-	private static byte[][][] FrameHistoryGreen;
-	private static byte[][][] FrameHistoryBlue;
-	private static byte[][][] MeanDifferenceHistoryRed;
-	private static byte[][][] MeanDifferenceHistoryGreen;
-	private static byte[][][] MeanDifferenceHistoryBlue;
-	private static int[][] HistoryFrameTotalRed;
-	private static int[][] HistoryFrameTotalGreen;
-	private static int[][] HistoryFrameTotalBlue;
-	private static int[][] HistoryVarianceTotalRed;
-	private static int[][] HistoryVarianceTotalGreen;
-	private static int[][] HistoryVarianceTotalBlue;
-    private static byte[][] TransformedFrameRed;
-    private static byte[][] TransformedFrameGreen;
-    private static byte[][] TransformedFrameBlue;
-	private static int HistoryIndex;
-	private static boolean HistoryReady;
-    private static int OneStandardDeviation;
-
 	protected CameraManager(Camera webcam, CanvasManager canvas, Configuration config) {
 		this.webcam = Optional.of(webcam);
 		processingLock = null;
@@ -149,24 +128,6 @@ public class CameraManager {
 
 	private void init(Detector detector) {
 		sectorStatuses = new boolean[ShotSearcher.SECTOR_ROWS][ShotSearcher.SECTOR_COLUMNS];
-		FrameHistoryRed = new byte[640][480][30];
-		FrameHistoryGreen = new byte[640][480][30];
-		FrameHistoryBlue = new byte[640][480][30];
-		MeanDifferenceHistoryRed = new byte[640][480][30];
-		MeanDifferenceHistoryGreen = new byte[640][480][30];
-		MeanDifferenceHistoryBlue = new byte[640][480][30];
-		HistoryFrameTotalRed = new int [640][480];
-		HistoryFrameTotalGreen = new int [640][480];
-		HistoryFrameTotalBlue = new int [640][480];
-		HistoryVarianceTotalRed = new int [640][480];
-		HistoryVarianceTotalGreen = new int [640][480];
-		HistoryVarianceTotalBlue = new int [640][480];
-		HistoryIndex=0;
-		HistoryReady = false;
-		TransformedFrameRed = new byte [640][480];
-		TransformedFrameGreen = new byte [640][480];
-		TransformedFrameBlue = new byte [640][480];
-	    OneStandardDeviation=0;
 
 		// Turn on all shot sectors by default
 		for (int x = 0; x < ShotSearcher.SECTOR_COLUMNS; x++) {
@@ -270,8 +231,28 @@ public class CameraManager {
 		private int seenFrames = 0;
 		private final ExecutorService detectionExecutor = Executors.newFixedThreadPool(200);
 
+		private BufferedImage[] frameHistory;
+		private int[][][] variance_historyR = new int [640][480][30];
+		private int[][][] variance_historyG = new int [640][480][30];
+		private int[][][] variance_historyB = new int [640][480][30];
+		private int[][] pixelSumOverTimeR = new int [640][480];
+		private int[][] pixelSumOverTimeG = new int [640][480];
+		private int[][] pixelSumOverTimeB = new int [640][480];
+		private int[][] varianceSumOverTimeR = new int [640][480];
+		private int[][] varianceSumOverTimeG = new int [640][480];
+		private int[][] varianceSumOverTimeB = new int [640][480];
+		private int historyIndex;
+		private boolean historyReady;
+
 		@Override
 		public void run() {
+
+			for (int i=0;i<30;i++) {
+				frameHistory[i] = new BufferedImage(640, 480, BufferedImage.TYPE_INT_RGB);
+			}
+
+			historyReady = false;
+
 			if (webcam.isPresent()) {
 				if (!webcam.get().isOpen()) {
 					webcam.get().setViewSize(new Dimension(FEED_WIDTH, FEED_HEIGHT));
@@ -456,88 +437,146 @@ public class CameraManager {
 		}
 
 		private void detectShotsNew(BufferedImage frame) {
+			float oneStandardDeviationR=0;
+			float oneStandardDeviationG=0;
+			float oneStandardDeviationB=0;
+			int R,G,B;
+			float meanOfR;
+			float meanOfG;
+			float meanOfB;
+			float amplitude;
+		    float[][] shotTransform = new float [640][480];
+
 			if (!isDetecting) return;
 
-			BufferedImage workingCopy = new BufferedImage(frame.getWidth(), frame.getHeight(),
-					BufferedImage.TYPE_INT_RGB);
+			for (int x = 2; x < 638; x++) {
+				for (int y = 2; y < 478; y++) {
+					// Grab the pixel colors, we'll need them a few times
+					R = (frame.getRGB(x,y) >> 16) & 0x000000FF;
+					G = (frame.getRGB(x,y) >> 8) & 0x000000FF;
+					B = (frame.getRGB(x,y) >> 0) & 0x000000FF;
 
-			int minX;
-			int maxX;
-			int minY;
-			int maxY;
+					// Remove the exiting circular buffer frame from the various total variables
+					pixelSumOverTimeR[x][y]-=(frameHistory[historyIndex].getRGB(x,y) >> 16) & 0x000000FF;
+					pixelSumOverTimeG[x][y]-=(frameHistory[historyIndex].getRGB(x,y) >> 8) & 0x000000FF;
+					pixelSumOverTimeB[x][y]-=(frameHistory[historyIndex].getRGB(x,y) >> 0) & 0x000000FF;
+					varianceSumOverTimeR[x][y]-=variance_historyR[x][y][historyIndex];
+					varianceSumOverTimeG[x][y]-=variance_historyG[x][y][historyIndex];
+					varianceSumOverTimeB[x][y]-=variance_historyB[x][y][historyIndex];
+					// Add the new pixels into the various pixel totals
+					pixelSumOverTimeR[x][y]+=R;
+					pixelSumOverTimeG[x][y]+=G;
+					pixelSumOverTimeB[x][y]+=B;
+					// Calculate the mean over time
+					meanOfR=(float)(pixelSumOverTimeR[x][y]/30.0);
+					meanOfG=(float)(pixelSumOverTimeG[x][y]/30.0);
+					meanOfB=(float)(pixelSumOverTimeB[x][y]/30.0);
+					// Calcualte the new variances and put them into the history circular buffer
+					variance_historyR[x][y][historyIndex]=(int)((meanOfR-R)*(meanOfR-R));
+					variance_historyG[x][y][historyIndex]=(int)((meanOfG-G)*(meanOfG-G));
+					variance_historyB[x][y][historyIndex]=(int)((meanOfB-B)*(meanOfB-B));
+                    // Add the new variances into the various variance totals
+					varianceSumOverTimeR[x][y]+=variance_historyR[x][y][historyIndex];
+					varianceSumOverTimeG[x][y]+=variance_historyG[x][y][historyIndex];
+					varianceSumOverTimeB[x][y]+=variance_historyB[x][y][historyIndex];
+					// Calculate strandard deviations
+					oneStandardDeviationR = (float)Math.sqrt(varianceSumOverTimeR[x][y]/30.0);
+					oneStandardDeviationG = (float)Math.sqrt(varianceSumOverTimeG[x][y]/30.0);
+					oneStandardDeviationB = (float)Math.sqrt(varianceSumOverTimeB[x][y]/30.0);
 
-			if (limitDetectProjection && projectionBounds.isPresent()) {
-				Bounds b = projectionBounds.get();
-				BufferedImage subFrame = frame.getSubimage((int)b.getMinX(), (int)b.getMinY(),
-						(int)b.getWidth(), (int)b.getHeight());
-				workingCopy.createGraphics().drawImage(subFrame, (int)b.getMinX(), (int)b.getMinY(), null);
+					amplitude=R-meanOfR;
+					if( R > meanOfR ) {
+						 shotTransform[x][y-2] += amplitude; // Copy the values to the grid
+						 shotTransform[x][y+2] += amplitude; // Copy the values to the grid
+						for(int dx=-1;dx<=1;dx++) {
+							 shotTransform[x+dx][y-1] += amplitude; // Copy the values to the grid
+							 shotTransform[x+dx][y+1] += amplitude; // Copy the values to the grid
+						}
+						for(int dx=-2;dx<=2;dx++) {
+							 shotTransform[x+dx][y] += amplitude; // Copy the values to the grid
+						}
+					}
+					amplitude=G-meanOfG;
+					if( G > meanOfG ) {
+						 shotTransform[x][y-2] += amplitude; // Copy the values to the grid
+						 shotTransform[x][y+2] += amplitude; // Copy the values to the grid
+						for(int dx=-1;dx<=1;dx++) {
+							 shotTransform[x+dx][y-1] += amplitude; // Copy the values to the grid
+							 shotTransform[x+dx][y+1] += amplitude; // Copy the values to the grid
+						}
+						for(int dx=-2;dx<=2;dx++) {
+							 shotTransform[x+dx][y] += amplitude; // Copy the values to the grid
+						}
+					}
+					amplitude=B-meanOfB;
+					if( B > meanOfB ) {
+						 shotTransform[x][y-2] += amplitude; // Copy the values to the grid
+						 shotTransform[x][y+2] += amplitude; // Copy the values to the grid
+						for(int dx=-1;dx<=1;dx++) {
+							 shotTransform[x+dx][y-1] += amplitude; // Copy the values to the grid
+							 shotTransform[x+dx][y+1] += amplitude; // Copy the values to the grid
+						}
+						for(int dx=-2;dx<=2;dx++) {
+							 shotTransform[x+dx][y] += amplitude; // Copy the values to the grid
+						}
+					}
 
-				minX = (int)projectionBounds.get().getMinX();
-				maxX = (int)projectionBounds.get().getMaxX();
-				minY = (int)projectionBounds.get().getMinY();
-				maxY = (int)projectionBounds.get().getMaxY();
-			} else {
-				workingCopy.createGraphics().drawImage(frame, 0, 0, null);
-
-				minX = 0;
-				maxX = frame.getWidth();
-				minY = 0;
-				maxY = frame.getHeight();
-			}
-
-
-
-			for (int x = minX; x < maxX; x++) {
-				for (int y = minY; y < maxY; y++) {
-					// Remember this frame for later.  (I assume we can capture object, maybe not.)
-					FrameHistoryRed[x][y][HistoryIndex]+=workingCopy.getRGB(x, y)&0xff;
-					FrameHistoryGreen[x][y][HistoryIndex]+=(workingCopy.getRGB(x, y)&0xff00)>>8;
-					FrameHistoryBlue[x][y][HistoryIndex]+=(workingCopy.getRGB(x, y)&0xff0000)>>16;
-					// Add the pixel to the running total
-					HistoryFrameTotalRed[x][y]+=FrameHistoryRed[x][y][HistoryIndex];
-					HistoryFrameTotalGreen[x][y]+=FrameHistoryGreen[x][y][HistoryIndex];
-					HistoryFrameTotalBlue[x][y]+=FrameHistoryBlue[x][y][HistoryIndex];
-                    // Wait until we know at least 30 history
-					if(HistoryReady==false) continue;
-
-
-
-			MeanDifferenceHistoryRed = new byte[640][480][30];
-			MeanDifferenceHistoryGreen = new byte[640][480][30];
-			MeanDifferenceHistoryBlue = new byte[640][480][30];
-			HistoryVarianceTotalRed = new int [640][480];
-			HistoryVarianceTotalGreen = new int [640][480];
-			HistoryVarianceTotalBlue = new int [640][480];
-			HistoryIndex=0;
-			HistoryReady = false;
-			TransformedFrameRed = new byte [640][480];
-			TransformedFrameGreen = new byte [640][480];
-			TransformedFrameBlue = new byte [640][480];
-		    OneStandardDeviation=0;
-
-
-							sectorStatuses = new boolean[ShotSearcher.SECTOR_ROWS][ShotSearcher.SECTOR_COLUMNS];
-
-
-				//	if (center.isPresent()) {
-			//			logger.debug("Suspected shot accepted: Original Coords ({}, {}), Center ({}, {}), {}",
-		//						x, y, center.get().getX(),
-	//							center.get().getY(), areaColor.get());
-//
-	//					if (cropped && projectionBounds.isPresent()) {
-						//	Bounds b = projectionBounds.get();
-					//		canvasManager.addShot(areaColor.get(), center.get().getX() + b.getMinX(),
-				//					center.get().getY() + b.getMinY());
-			//			} else {
-							//canvasManager.addShot(areaColor.get(), center.get().getX(),
-						//			center.get().getY());
-					//	}
-						//return;
-//					}
+/*
+  					if( R > (meanOfR+oneStandardDeviationR) ) {
+						 shotTransform[x][y-2] += 1; // Copy the values to the grid
+						 shotTransform[x][y+2] += 1; // Copy the values to the grid
+						for(int dx=-1;dx<=1;dx++) {
+							 shotTransform[x+dx][y-1] += 1; // Copy the values to the grid
+							 shotTransform[x+dx][y+1] += 1; // Copy the values to the grid
+						}
+						for(int dx=-2;dx<=2;dx++) {
+							 shotTransform[x+dx][y] += 1; // Copy the values to the grid
+						}
+					}
+  					if( G > (meanOfR+oneStandardDeviationG) ) {
+						 shotTransform[x][y-2] += 1; // Copy the values to the grid
+						 shotTransform[x][y+2] += 1; // Copy the values to the grid
+						for(int dx=-1;dx<=1;dx++) {
+							 shotTransform[x+dx][y-1] += 1; // Copy the values to the grid
+							 shotTransform[x+dx][y+1] += 1; // Copy the values to the grid
+						}
+						for(int dx=-2;dx<=2;dx++) {
+							 shotTransform[x+dx][y] += 1; // Copy the values to the grid
+						}
+					}
+  					if( B > (meanOfR+oneStandardDeviationB) ) {
+						 shotTransform[x][y-2] += 1; // Copy the values to the grid
+						 shotTransform[x][y+2] += 1; // Copy the values to the grid
+						for(int dx=-1;dx<=1;dx++) {
+							 shotTransform[x+dx][y-1] += 1; // Copy the values to the grid
+							 shotTransform[x+dx][y+1] += 1; // Copy the values to the grid
+						}
+						for(int dx=-2;dx<=2;dx++) {
+							 shotTransform[x+dx][y] += 1; // Copy the values to the grid
+						}
+					}
+*/
 
 				}
 			}
+			// Copy the current frame into the circular buffer
+			frameHistory[historyIndex].createGraphics().drawImage(frame, 0, 0, null);
 
+			if (historyIndex==29) historyReady=true;
+			historyIndex=(historyIndex+1) % 30;
+
+			if (historyReady==false) return;
+
+
+			// Check for hit
+			for (int x = 2; x < 638; x++) {
+				for (int y = 2; y < 478; y++) {
+					if (shotTransform[x][y]>oneStandardDeviationR*3) {
+						logger.debug("Suspected shot accepted: ({}, {})", x, y);
+  				    	canvasManager.addShot(javafx.scene.paint.Color.RED, (double)x, (double)y);
+					}
+				}
+			}
 
 			if (webcam.isPresent()) {
 				double webcamFPS = webcam.get().getFPS();
@@ -554,7 +593,7 @@ public class CameraManager {
 			}
 
 			if (debuggerListener.isPresent()) {
-				debuggerListener.get().updateDebugView(workingCopy);
+//				debuggerListener.get().updateDebugView(workingCopy);
 			}
 		}
 
