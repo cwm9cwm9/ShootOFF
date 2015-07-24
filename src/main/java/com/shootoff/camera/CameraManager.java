@@ -52,7 +52,10 @@ import javafx.scene.control.Alert;
 import javafx.scene.control.Alert.AlertType;
 import javafx.scene.image.Image;
 
+
 public class CameraManager {
+	public static final int HISTORY_SIZE = 30;
+	public static final float HISTORY_SIZE_FLOAT = (float)HISTORY_SIZE;
 	public static final int FEED_WIDTH = 640;
 	public static final int FEED_HEIGHT = 480;
 	public static final int MIN_SHOT_DETECTION_FPS = 5;
@@ -100,6 +103,16 @@ public class CameraManager {
 		this.config = config;
 
 		init(new Detector());
+	}
+
+	protected CameraManager(File videoFile, CanvasManager canvas, Configuration config) {
+		this.webcam = Optional.empty();
+		processingLock = null;
+		this.canvasManager = canvas;
+		this.config = config;
+
+		init(new Detector(videoFile));
+
 	}
 
 	protected CameraManager(File videoFile, Object processingLock, CanvasManager canvas,
@@ -231,27 +244,46 @@ public class CameraManager {
 		private int seenFrames = 0;
 		private final ExecutorService detectionExecutor = Executors.newFixedThreadPool(200);
 
-		private BufferedImage[] frameHistory;
-		private int[][][] variance_historyR = new int [640][480][30];
-		private int[][][] variance_historyG = new int [640][480][30];
-		private int[][][] variance_historyB = new int [640][480][30];
+		private BufferedImage[] frameHistory = new BufferedImage[HISTORY_SIZE];
+		private int[][][] variance_historyR = new int [640][480][HISTORY_SIZE];
+		private int[][][] variance_historyG = new int [640][480][HISTORY_SIZE];
+		private int[][][] variance_historyB = new int [640][480][HISTORY_SIZE];
 		private int[][] pixelSumOverTimeR = new int [640][480];
 		private int[][] pixelSumOverTimeG = new int [640][480];
 		private int[][] pixelSumOverTimeB = new int [640][480];
 		private int[][] varianceSumOverTimeR = new int [640][480];
 		private int[][] varianceSumOverTimeG = new int [640][480];
 		private int[][] varianceSumOverTimeB = new int [640][480];
+		private float[][] meanOfR = new float [640][480];
+		private float[][] meanOfG = new float [640][480];
+		private float[][] meanOfB = new float [640][480];
+	    float[][] shotTransform = new float [640][480];
+
 		private int historyIndex;
 		private boolean historyReady;
 
-		@Override
-		public void run() {
+		private File videoFile;
+		private IMediaReader reader;
 
-			for (int i=0;i<30;i++) {
+		public Detector()
+		{
+			for (int i=0;i<HISTORY_SIZE;i++) {
 				frameHistory[i] = new BufferedImage(640, 480, BufferedImage.TYPE_INT_RGB);
 			}
 
 			historyReady = false;
+		}
+
+		public Detector(File inVideoFile) {
+			this();
+			videoFile = inVideoFile;
+			reader = ToolFactory.makeReader(videoFile.getAbsolutePath());
+			reader.setBufferedImageTypeToGenerate(BufferedImage.TYPE_3BYTE_BGR);
+			reader.addListener(this);
+		}
+
+		@Override
+		public void run() {
 
 			if (webcam.isPresent()) {
 				if (!webcam.get().isOpen()) {
@@ -260,6 +292,10 @@ public class CameraManager {
 				}
 
 				streamCameraFrames();
+			}
+			else
+			{
+				while (reader.readPacket() == null);
 			}
 		}
 
@@ -271,9 +307,9 @@ public class CameraManager {
 		 */
 		public void onVideoPicture(IVideoPictureEvent event)
 		{
+			//frameProcessing=true;
 			BufferedImage currentFrame = event.getImage();
-
-			detectShotsNew(currentFrame);
+			ProcessImage(currentFrame);
 		}
 
 		@Override
@@ -287,7 +323,6 @@ public class CameraManager {
 		}
 
 		private void streamCameraFrames() {
-			long startDetectionCycle = System.currentTimeMillis();
 
 			while (isStreaming) {
 				if (!webcam.isPresent() || !webcam.get().isImageNew()) continue;
@@ -299,59 +334,66 @@ public class CameraManager {
 					detectionExecutor.shutdown();
 					return;
 				}
+                ProcessImage(currentFrame);
+			}
 
-				final AverageFrameComponents averages = averageFrameComponents(currentFrame);
 
-				if (pixelTransformerInitialized == false) {
-					seenFrames++;
-					if (seenFrames == INIT_FRAME_COUNT) {
-						if (averages.getLightingCondition() == LightingCondition.VERY_BRIGHT) {
-							showBrightnessWarning();
-						}
+			detectionExecutor.shutdown();
+		}
 
-						pixelTransformerInitialized = true;
-					} else {
-						continue;
+		private void ProcessImage(BufferedImage currentFrame) {
+			long startDetectionCycle = System.currentTimeMillis();
+
+			final AverageFrameComponents averages = averageFrameComponents(currentFrame);
+
+			if (pixelTransformerInitialized == false) {
+				seenFrames++;
+				if (seenFrames == INIT_FRAME_COUNT) {
+					if (averages.getLightingCondition() == LightingCondition.VERY_BRIGHT) {
+						showBrightnessWarning();
 					}
-				}
 
-				if (recording) {
-					BufferedImage image = ConverterFactory.convertToType(currentFrame, BufferedImage.TYPE_3BYTE_BGR);
-					IConverter converter = ConverterFactory.createConverter(image, IPixelFormat.Type.YUV420P);
-
-					IVideoPicture frame = converter.toPicture(image,
-							(System.currentTimeMillis() - recordingStartTime) * 1000);
-					frame.setKeyFrame(isFirstFrame);
-					frame.setQuality(0);
-					isFirstFrame = false;
-
-					videoWriter.encodeVideo(0, frame);
-				}
-
-				if (cropFeedToProjection && projectionBounds.isPresent()) {
-					Bounds b = projectionBounds.get();
-					currentFrame = currentFrame.getSubimage((int)b.getMinX(), (int)b.getMinY(),
-							(int)b.getWidth(), (int)b.getHeight());
-				}
-
-				Image img = SwingFXUtils.toFXImage(currentFrame, null);
-
-				if (cropFeedToProjection) {
-					canvasManager.updateBackground(img, projectionBounds);
+					pixelTransformerInitialized = true;
 				} else {
-					canvasManager.updateBackground(img, Optional.empty());
-				}
-
-				if (System.currentTimeMillis() -
-						startDetectionCycle >= config.getDetectionRate()) {
-
-					startDetectionCycle = System.currentTimeMillis();
-					final BufferedImage frame = currentFrame;
-					detectionExecutor.submit(new Thread(() -> {detectShots(frame, averages);}));
+					return;
 				}
 			}
 
-			detectionExecutor.shutdown();
+			if (recording) {
+				BufferedImage image = ConverterFactory.convertToType(currentFrame, BufferedImage.TYPE_3BYTE_BGR);
+				IConverter converter = ConverterFactory.createConverter(image, IPixelFormat.Type.YUV420P);
+
+				IVideoPicture frame = converter.toPicture(image,
+						(System.currentTimeMillis() - recordingStartTime) * 1000);
+				frame.setKeyFrame(isFirstFrame);
+				frame.setQuality(0);
+				isFirstFrame = false;
+
+				videoWriter.encodeVideo(0, frame);
+			}
+
+			if (cropFeedToProjection && projectionBounds.isPresent()) {
+				Bounds b = projectionBounds.get();
+				currentFrame = currentFrame.getSubimage((int)b.getMinX(), (int)b.getMinY(),
+						(int)b.getWidth(), (int)b.getHeight());
+			}
+
+			Image img = SwingFXUtils.toFXImage(currentFrame, null);
+
+			if (cropFeedToProjection) {
+				canvasManager.updateBackground(img, projectionBounds);
+			} else {
+				canvasManager.updateBackground(img, Optional.empty());
+			}
+
+			final BufferedImage frame = currentFrame;
+			detectShotsNew(frame, averages);
+			if (System.currentTimeMillis() -
+					startDetectionCycle >= config.getDetectionRate()) {
+
+				startDetectionCycle = System.currentTimeMillis();
+				//detectionExecutor.submit(new Thread(() -> {detectShotsNew(frame, averages);}));
+			}
 		}
 
 		private class AverageFrameComponents {
@@ -436,18 +478,24 @@ public class CameraManager {
 			frame.setRGB(x, y, new Color((int)r, c.getGreen(), (int)b).getRGB());
 		}
 
-		private void detectShotsNew(BufferedImage frame) {
+		private void detectShotsNew(BufferedImage frame, AverageFrameComponents averages) {
 			float oneStandardDeviationR=0;
 			float oneStandardDeviationG=0;
 			float oneStandardDeviationB=0;
 			int R,G,B;
-			float meanOfR;
-			float meanOfG;
-			float meanOfB;
 			float amplitude;
-		    float[][] shotTransform = new float [640][480];
+			int count;
+			count=0;
+			if (!isDetecting) {
+				//frameProcessing=false;
+				return;
+			}
 
-			if (!isDetecting) return;
+			for (int x = 0; x < 640; x++) {
+				for (int y = 0; y < 480; y++) {
+					shotTransform[x][y]=(float)0.0;
+				}
+			}
 
 			for (int x = 2; x < 638; x++) {
 				for (int y = 2; y < 478; y++) {
@@ -468,26 +516,90 @@ public class CameraManager {
 					pixelSumOverTimeG[x][y]+=G;
 					pixelSumOverTimeB[x][y]+=B;
 					// Calculate the mean over time
-					meanOfR=(float)(pixelSumOverTimeR[x][y]/30.0);
-					meanOfG=(float)(pixelSumOverTimeG[x][y]/30.0);
-					meanOfB=(float)(pixelSumOverTimeB[x][y]/30.0);
+					meanOfR[x][y]=(float)(pixelSumOverTimeR[x][y]/HISTORY_SIZE_FLOAT);
+					meanOfG[x][y]=(float)(pixelSumOverTimeG[x][y]/HISTORY_SIZE_FLOAT);
+					meanOfB[x][y]=(float)(pixelSumOverTimeB[x][y]/HISTORY_SIZE_FLOAT);
+				}
+			}
+			for (int x = 2; x < 638; x++) {
+				for (int y = 2; y < 478; y++) {
+					R = (frame.getRGB(x,y) >> 16) & 0x000000FF;
+					G = (frame.getRGB(x,y) >> 8) & 0x000000FF;
+					B = (frame.getRGB(x,y) >> 0) & 0x000000FF;
+
+					float highestNearbyMeanOfR;
+					float highestNearbyMeanOfG;
+					float highestNearbyMeanOfB;
+					highestNearbyMeanOfR=
+							Math.max(
+									Math.max(
+											Math.max(
+													Math.max(
+															Math.max(
+																	Math.max(
+																			Math.max(
+																					Math.max(meanOfR[x-1][y-1],
+																							meanOfR[x-1][y]),
+																					meanOfR[x-1][y+1]),
+																			meanOfR[x][y-1]),
+																	meanOfR[x][y]),
+															meanOfR[x][y+1]),
+													meanOfR[x+1][y-1]),
+											meanOfR[x+1][y]),
+									meanOfR[x+1][y+1]);
+					highestNearbyMeanOfG=
+							Math.max(
+									Math.max(
+											Math.max(
+													Math.max(
+															Math.max(
+																	Math.max(
+																			Math.max(
+																					Math.max(meanOfG[x-1][y-1],
+																							meanOfG[x-1][y]),
+																					meanOfG[x-1][y+1]),
+																			meanOfG[x][y-1]),
+																	meanOfG[x][y]),
+															meanOfG[x][y+1]),
+													meanOfG[x+1][y-1]),
+											meanOfG[x+1][y]),
+									meanOfG[x+1][y+1]);
+					highestNearbyMeanOfB=
+							Math.max(
+									Math.max(
+											Math.max(
+													Math.max(
+															Math.max(
+																	Math.max(
+																			Math.max(
+																					Math.max(meanOfB[x-1][y-1],
+																							meanOfB[x-1][y]),
+																					meanOfB[x-1][y+1]),
+																			meanOfB[x][y-1]),
+																	meanOfB[x][y]),
+															meanOfB[x][y+1]),
+													meanOfB[x+1][y-1]),
+											meanOfB[x+1][y]),
+									meanOfB[x+1][y+1]);
+
 					// Calcualte the new variances and put them into the history circular buffer
-					variance_historyR[x][y][historyIndex]=(int)((meanOfR-R)*(meanOfR-R));
-					variance_historyG[x][y][historyIndex]=(int)((meanOfG-G)*(meanOfG-G));
-					variance_historyB[x][y][historyIndex]=(int)((meanOfB-B)*(meanOfB-B));
+					variance_historyR[x][y][historyIndex]=(int)((highestNearbyMeanOfR-R)*(highestNearbyMeanOfR-R));
+					variance_historyG[x][y][historyIndex]=(int)((highestNearbyMeanOfG-G)*(highestNearbyMeanOfG-G));
+					variance_historyB[x][y][historyIndex]=(int)((highestNearbyMeanOfB-B)*(highestNearbyMeanOfB-B));
                     // Add the new variances into the various variance totals
 					varianceSumOverTimeR[x][y]+=variance_historyR[x][y][historyIndex];
 					varianceSumOverTimeG[x][y]+=variance_historyG[x][y][historyIndex];
 					varianceSumOverTimeB[x][y]+=variance_historyB[x][y][historyIndex];
 					// Calculate strandard deviations
-					oneStandardDeviationR = (float)Math.sqrt(varianceSumOverTimeR[x][y]/30.0);
-					oneStandardDeviationG = (float)Math.sqrt(varianceSumOverTimeG[x][y]/30.0);
-					oneStandardDeviationB = (float)Math.sqrt(varianceSumOverTimeB[x][y]/30.0);
+					oneStandardDeviationR = (float)Math.sqrt(varianceSumOverTimeR[x][y]/HISTORY_SIZE_FLOAT)+(float)1;
+					oneStandardDeviationG = (float)Math.sqrt(varianceSumOverTimeG[x][y]/HISTORY_SIZE_FLOAT)+(float)1;
+					oneStandardDeviationB = (float)Math.sqrt(varianceSumOverTimeB[x][y]/HISTORY_SIZE_FLOAT)+(float)1;
 
-					amplitude=R-meanOfR;
-					if( R > meanOfR ) {
-						 shotTransform[x][y-2] += amplitude; // Copy the values to the grid
-						 shotTransform[x][y+2] += amplitude; // Copy the values to the grid
+//					if( R > highestNearbyMeanOfR ) {
+//						count++;
+						amplitude=Math.min(3, (R-highestNearbyMeanOfR)/oneStandardDeviationR);
+						shotTransform[x][y-2] += amplitude; // Copy the values to the grid
+						shotTransform[x][y+2] += amplitude; // Copy the values to the grid
 						for(int dx=-1;dx<=1;dx++) {
 							 shotTransform[x+dx][y-1] += amplitude; // Copy the values to the grid
 							 shotTransform[x+dx][y+1] += amplitude; // Copy the values to the grid
@@ -495,11 +607,12 @@ public class CameraManager {
 						for(int dx=-2;dx<=2;dx++) {
 							 shotTransform[x+dx][y] += amplitude; // Copy the values to the grid
 						}
-					}
-					amplitude=G-meanOfG;
-					if( G > meanOfG ) {
-						 shotTransform[x][y-2] += amplitude; // Copy the values to the grid
-						 shotTransform[x][y+2] += amplitude; // Copy the values to the grid
+//					}
+//					if( G > highestNearbyMeanOfG ) {
+//						count++;
+						amplitude=Math.min(3, (G-highestNearbyMeanOfG)/oneStandardDeviationG);
+						shotTransform[x][y-2] += amplitude; // Copy the values to the grid
+						shotTransform[x][y+2] += amplitude; // Copy the values to the grid
 						for(int dx=-1;dx<=1;dx++) {
 							 shotTransform[x+dx][y-1] += amplitude; // Copy the values to the grid
 							 shotTransform[x+dx][y+1] += amplitude; // Copy the values to the grid
@@ -507,11 +620,12 @@ public class CameraManager {
 						for(int dx=-2;dx<=2;dx++) {
 							 shotTransform[x+dx][y] += amplitude; // Copy the values to the grid
 						}
-					}
-					amplitude=B-meanOfB;
-					if( B > meanOfB ) {
-						 shotTransform[x][y-2] += amplitude; // Copy the values to the grid
-						 shotTransform[x][y+2] += amplitude; // Copy the values to the grid
+//					}
+//					if( B > highestNearbyMeanOfB ) {
+//						count++;
+						amplitude=Math.max(-1, Math.min(3, (B-highestNearbyMeanOfB)/oneStandardDeviationB));
+						shotTransform[x][y-2] += amplitude; // Copy the values to the grid
+						shotTransform[x][y+2] += amplitude; // Copy the values to the grid
 						for(int dx=-1;dx<=1;dx++) {
 							 shotTransform[x+dx][y-1] += amplitude; // Copy the values to the grid
 							 shotTransform[x+dx][y+1] += amplitude; // Copy the values to the grid
@@ -519,10 +633,10 @@ public class CameraManager {
 						for(int dx=-2;dx<=2;dx++) {
 							 shotTransform[x+dx][y] += amplitude; // Copy the values to the grid
 						}
-					}
+//					}
 
 /*
-  					if( R > (meanOfR+oneStandardDeviationR) ) {
+  					if( R > (meanOfR+oneStandardDeviationR*4) ) {
 						 shotTransform[x][y-2] += 1; // Copy the values to the grid
 						 shotTransform[x][y+2] += 1; // Copy the values to the grid
 						for(int dx=-1;dx<=1;dx++) {
@@ -533,7 +647,7 @@ public class CameraManager {
 							 shotTransform[x+dx][y] += 1; // Copy the values to the grid
 						}
 					}
-  					if( G > (meanOfR+oneStandardDeviationG) ) {
+  					if( G > (meanOfR+oneStandardDeviationG*4) ) {
 						 shotTransform[x][y-2] += 1; // Copy the values to the grid
 						 shotTransform[x][y+2] += 1; // Copy the values to the grid
 						for(int dx=-1;dx<=1;dx++) {
@@ -544,7 +658,7 @@ public class CameraManager {
 							 shotTransform[x+dx][y] += 1; // Copy the values to the grid
 						}
 					}
-  					if( B > (meanOfR+oneStandardDeviationB) ) {
+  					if( B > (meanOfR+oneStandardDeviationB*4) ) {
 						 shotTransform[x][y-2] += 1; // Copy the values to the grid
 						 shotTransform[x][y+2] += 1; // Copy the values to the grid
 						for(int dx=-1;dx<=1;dx++) {
@@ -562,21 +676,31 @@ public class CameraManager {
 			// Copy the current frame into the circular buffer
 			frameHistory[historyIndex].createGraphics().drawImage(frame, 0, 0, null);
 
-			if (historyIndex==29) historyReady=true;
-			historyIndex=(historyIndex+1) % 30;
+			historyIndex=(historyIndex+1) % HISTORY_SIZE;
+			if (historyIndex==0) historyReady=true;
 
-			if (historyReady==false) return;
+			if (historyReady==false) {
+				//frameProcessing=false;
+				return;
+			}
 
 
 			// Check for hit
+			float max;
+			max=0;
 			for (int x = 2; x < 638; x++) {
 				for (int y = 2; y < 478; y++) {
-					if (shotTransform[x][y]>oneStandardDeviationR*3) {
+					if (max<shotTransform[x][y]) max = shotTransform[x][y];
+					if (shotTransform[x][y]>6) {
 						logger.debug("Suspected shot accepted: ({}, {})", x, y);
   				    	canvasManager.addShot(javafx.scene.paint.Color.RED, (double)x, (double)y);
 					}
 				}
 			}
+			System.out.printf("Max shottransform %f \n", max);
+			System.out.printf("pixels over avg %d \n", count);
+
+			//frameProcessing=false;
 
 			if (webcam.isPresent()) {
 				double webcamFPS = webcam.get().getFPS();
@@ -597,91 +721,6 @@ public class CameraManager {
 			}
 		}
 
-
-		private void detectShots(BufferedImage frame, AverageFrameComponents averages) {
-			if (!isDetecting) return;
-
-			BufferedImage workingCopy = new BufferedImage(frame.getWidth(), frame.getHeight(),
-					BufferedImage.TYPE_INT_RGB);
-
-			int minX;
-			int maxX;
-			int minY;
-			int maxY;
-
-			if (limitDetectProjection && projectionBounds.isPresent()) {
-				Bounds b = projectionBounds.get();
-				BufferedImage subFrame = frame.getSubimage((int)b.getMinX(), (int)b.getMinY(),
-						(int)b.getWidth(), (int)b.getHeight());
-				workingCopy.createGraphics().drawImage(subFrame, (int)b.getMinX(), (int)b.getMinY(), null);
-
-				minX = (int)projectionBounds.get().getMinX();
-				maxX = (int)projectionBounds.get().getMaxX();
-				minY = (int)projectionBounds.get().getMinY();
-				maxY = (int)projectionBounds.get().getMaxY();
-			} else {
-				workingCopy.createGraphics().drawImage(frame, 0, 0, null);
-
-				minX = 0;
-				maxX = frame.getWidth();
-				minY = 0;
-				maxY = frame.getHeight();
-			}
-
-			float averageRed = averages.getAverageRed();
-			float dr = IDEAL_R_AVERAGE / averageRed;
-			float db = 1 - (dr - 1);
-
-			for (int x = minX; x < maxX; x++) {
-				for (int y = minY; y < maxY; y++) {
-
-					// If the color temperatures (using just the red component as an
-					// approximation) are only a bit off from ideal step up the heat.
-					// We don't want to make big changes or it will blow up in dark
-					// rooms by trying to do huge corrections that max r and zero b
-					// components in rgb pixels.
-					if (averageRed < IDEAL_R_AVERAGE && dr < 2f) {
-						adjustColorTemperature(workingCopy, x, y, dr, db);
-					}
-
-					pixelTransformer.applyFilter(workingCopy, x, y, averages.getLightingCondition());
-				}
-			}
-
-			BufferedImage grayScale = new BufferedImage(frame.getWidth(),
-					frame.getHeight(), BufferedImage.TYPE_BYTE_GRAY);
-			grayScale.createGraphics().drawImage(workingCopy, 0, 0, null);
-
-			ShotSearcher shotSearcher = new ShotSearcher(config, canvasManager, sectorStatuses,
-					frame, grayScale, projectionBounds, cropFeedToProjection);
-
-			if (webcam.isPresent()) {
-				double webcamFPS = webcam.get().getFPS();
-				if (debuggerListener.isPresent()) {
-					debuggerListener.get().updateFeedData(webcamFPS, averages.getLightingCondition());
-				}
-				if (webcamFPS < MIN_SHOT_DETECTION_FPS && !showedFPSWarning) {
-					logger.warn("[{}] Current webcam FPS is {}, which is too low for reliable shot detection",
-							webcam.get().getName(), webcamFPS);
-					showFPSWarning(webcamFPS);
-					showedFPSWarning = true;
-				}
-			}
-
-			if (centerApproxBorderSize.isPresent()) {
-				shotSearcher.setCenterApproxBorderSize(centerApproxBorderSize.get());
-			}
-
-			if (minimumShotDimension.isPresent()) {
-				shotSearcher.setMinimumShotDimension(minimumShotDimension.get());
-			}
-
-			new Thread(shotSearcher).start();
-
-			if (debuggerListener.isPresent()) {
-				debuggerListener.get().updateDebugView(workingCopy);
-			}
-		}
 
 		private void showMissingCameraError() {
 			Platform.runLater(() -> {
