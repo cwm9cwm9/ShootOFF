@@ -54,8 +54,9 @@ import javafx.scene.image.Image;
 
 
 public class CameraManager {
-	public static final int LASER_TRANSITION = 10;
-	public static final int HISTORY_SIZE = 5;
+	public static final int LASER_TRANSITION = 30;
+	public static final int HISTORY_SIZE = 4;
+	public static final int HUGHES_TRANFORM_THRESHOLD=75;
 	public static final float HISTORY_SIZE_FLOAT = (float)HISTORY_SIZE;
 	public static final int FEED_WIDTH = 640;
 	public static final int FEED_HEIGHT = 480;
@@ -511,38 +512,35 @@ public class CameraManager {
 			int amplitude;
 			for (int x = 2; x < 638; x++) {
 				for (int y = 2; y < 478; y++) {
+					amplitude=0;
 					// Seach for bright pixels that are potientially edges (must neighbor a dark pixel)
 					if(amplitudeR[x][y]>LASER_TRANSITION && (amplitudeR[x+1][y]<LASER_TRANSITION||amplitudeR[x-1][y]<LASER_TRANSITION||amplitudeR[x][y+1]<LASER_TRANSITION||amplitudeR[x][y-1]<LASER_TRANSITION)) {
 						// Update acumulator space for Hough transform
-						amplitude = amplitudeR[x][y];
-						for(int dx=-1;dx<=1;dx++) {
-							for(int dy=-1;dy<=1;dy++) {
-							 shotTransform[x+dx][y+dy] += amplitude;
-							}
-						}
+						amplitude = amplitudeR[x][y]-LASER_TRANSITION;
 					}
 
 					// Seach for bright pixels that are potientially edges (must neighbor a dark pixel)
-					if(amplitudeG[x][y]>5 && (amplitudeG[x+1][y]<LASER_TRANSITION||amplitudeG[x-1][y]<LASER_TRANSITION||amplitudeG[x][y+1]<LASER_TRANSITION||amplitudeG[x][y-1]<LASER_TRANSITION)) {
+					if(amplitudeG[x][y]>LASER_TRANSITION && (amplitudeG[x+1][y]<LASER_TRANSITION||amplitudeG[x-1][y]<LASER_TRANSITION||amplitudeG[x][y+1]<LASER_TRANSITION||amplitudeG[x][y-1]<LASER_TRANSITION)) {
 						// Update acumulator space for Hough transform
-						amplitude = Math.min(amplitudeG[x][y], 20);
-						for(int dx=-1;dx<=1;dx++) {
-							for(int dy=-1;dy<=1;dy++) {
-							 shotTransform[x+dx][y+dy] += amplitude;
-							}
-						}
+						amplitude += amplitudeG[x][y]-LASER_TRANSITION;
 					}
 
 					// Seach for bright pixels that are potientially edges (must neighbor a dark pixel)
 					if(amplitudeB[x][y]>LASER_TRANSITION && (amplitudeB[x+1][y]<LASER_TRANSITION||amplitudeB[x-1][y]<LASER_TRANSITION||amplitudeB[x][y+1]<LASER_TRANSITION||amplitudeB[x][y-1]<LASER_TRANSITION)) {
 						// Update acumulator space for Hough transform
-						amplitude = Math.max(amplitudeB[x][y], 20);
-						for(int dx=-1;dx<=1;dx++) {
-							for(int dy=-1;dy<=1;dy++) {
-							 shotTransform[x+dx][y+dy] += amplitude;
-							}
-						}
+						amplitude += amplitudeB[x][y]-LASER_TRANSITION;
 					}
+					for(int dx=-1;dx<=1;dx++) {
+						shotTransform[x+dx][y+1] += amplitude;
+						shotTransform[x+dx][y-1] += amplitude;
+					}
+					shotTransform[x-1][y] += amplitude;
+					shotTransform[x+1][y] += amplitude;
+
+					shotTransform[x-2][y] += amplitude;
+					shotTransform[x+2][y] += amplitude;
+					shotTransform[x][y-2] += amplitude;
+					shotTransform[x][y+2] += amplitude;
 				}
 			}
 
@@ -563,7 +561,7 @@ public class CameraManager {
 			for (int x = 2; x < 638; x++) {
 				for (int y = 2; y < 478; y++) {
 					if (max<shotTransform[x][y]) max = shotTransform[x][y];
-					if (shotTransform[x][y]>300) {
+					if (shotTransform[x][y]>HUGHES_TRANFORM_THRESHOLD 	 ) {
 						logger.debug("Suspected shot accepted: ({}, {})", x, y);
   				    	canvasManager.addShot(javafx.scene.paint.Color.RED, (double)x, (double)y);
 					}
