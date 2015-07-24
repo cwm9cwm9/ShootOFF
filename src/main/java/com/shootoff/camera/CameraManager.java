@@ -54,9 +54,9 @@ import javafx.scene.image.Image;
 
 
 public class CameraManager {
-	public static final int LASER_TRANSITION = 30;
-	public static final int HISTORY_SIZE = 3;
-	public static final int HUGHES_TRANFORM_THRESHOLD=75;
+	public static final int LASER_TRANSITION = 20;
+	public static final int HISTORY_SIZE = 5;
+	public static final int HUGHES_TRANFORM_THRESHOLD=120;
 	public static final float HISTORY_SIZE_FLOAT = (float)HISTORY_SIZE;
 	public static final int FEED_WIDTH = 640;
 	public static final int FEED_HEIGHT = 480;
@@ -517,8 +517,14 @@ public class CameraManager {
 			for (int x = 2; x < 638; x++) {
 				for (int y = 2; y < 478; y++) {
 					amplitude=0;
+					int offamplitude=amplitudeR[x][y];
 					// Seach for bright pixels that are potientially edges (must neighbor a dark pixel)
-					if(amplitudeR[x][y]>LASER_TRANSITION && (amplitudeR[x+1][y]<LASER_TRANSITION||amplitudeR[x-1][y]<LASER_TRANSITION||amplitudeR[x][y+1]<LASER_TRANSITION||amplitudeR[x][y-1]<LASER_TRANSITION)) {
+					if(amplitudeR[x][y]>LASER_TRANSITION &&
+							(
+							  	  (amplitudeR[x+1][y]<offamplitude&&amplitudeR[x+2][y]<offamplitude)
+								||(amplitudeR[x-1][y]<offamplitude&&amplitudeR[x-2][y]<offamplitude)
+								||(amplitudeR[x][y+1]<offamplitude&&amplitudeR[x][y+2]<offamplitude)
+								||(amplitudeR[x][y-1]<offamplitude&&amplitudeR[x][y-2]<offamplitude))) {
 						// Update acumulator space for Hough transform
 						amplitude = amplitudeR[x][y]-LASER_TRANSITION;
 					}
@@ -564,12 +570,24 @@ public class CameraManager {
 			// Check for hit
 			float max;
 			max=0;
-			for (int x = 2; x < 638; x++) {
-				for (int y = 2; y < 478; y++) {
+			for (int x = 10; x < 630; x++) {
+				for (int y = 10; y < 470; y++) {
 					if (max<shotTransform[x][y]) max = shotTransform[x][y];
-					if (shotTransform[x][y]>HUGHES_TRANFORM_THRESHOLD 	 ) {
-						logger.debug("Suspected shot accepted: ({}, {})", x, y);
-  				    	canvasManager.addShot(javafx.scene.paint.Color.RED, (double)x, (double)y);
+					if (shotTransform[x][y]>HUGHES_TRANFORM_THRESHOLD) {
+						int xLocalMaxima=0, yLocalMaxima=0;
+						int Maxima=0;
+						for(int dx = -10; dx<=10;dx++){
+							for(int dy = -10; dy<=10;dy++){
+								if (Maxima<shotTransform[dx+x][dy+y]) {
+									xLocalMaxima=dx+x;
+									yLocalMaxima=dy+y;
+									Maxima=shotTransform[dx+x][dy+y];
+								}
+							}
+						}
+
+						logger.debug("Suspected shot accepted: ({}, {})", xLocalMaxima, yLocalMaxima);
+  				    	canvasManager.addShot(javafx.scene.paint.Color.RED, (double)xLocalMaxima, (double)yLocalMaxima);
 					}
 				}
 			}

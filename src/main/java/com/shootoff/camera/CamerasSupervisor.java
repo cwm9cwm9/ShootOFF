@@ -39,7 +39,13 @@ public class CamerasSupervisor {
 	public void addCameraManager(Camera webcam, CanvasManager canvasManager) {
 		//managers.add(new CameraManager(webcam, canvasManager, config));
 
-		File videoFile = new  File(getClass().getResource("/shotsearcher/ps3eye_hardware_defaults_bright_room.mp4").getFile());
+		File videoFile = new  File(getClass().getResource("/shotsearcher/ps3eye_hardware_defaults_ambient_light_nature_scene.mp4").getFile());
+		//File videoFile = new  File(getClass().getResource("/shotsearcher/ps3eye_hardware_defaults_bright_room.mp4").getFile());
+		//File videoFile = new  File(getClass().getResource("/shotsearcher/ps3eye_hardware_defaults_projector_dark_room.mp4").getFile());
+		//File videoFile = new  File(getClass().getResource("/shotsearcher/ps3eye_hardware_defaults_safari_green_laser_lights_off.mp4").getFile());
+		//File videoFile = new  File(getClass().getResource("/shotsearcher/ps3eye_hardware_defaults_safari_green_laser_lights_on.mp4").getFile());
+		//File videoFile = new  File(getClass().getResource("/shotsearcher/ps3eye_hardware_defaults_safari_red_laser_lights_off.mp4").getFile());
+		//File videoFile = new  File(getClass().getResource("/shotsearcher/ps3eye_hardware_defaults_safari_red_laser_lights_on.mp4").getFile());
 		managers.add(new CameraManager(videoFile, canvasManager, config));
 	}
 
